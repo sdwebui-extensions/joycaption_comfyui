@@ -1,10 +1,8 @@
 import torch
-from transformers import AutoProcessor, LlavaForConditionalGeneration
 import folder_paths
 from pathlib import Path
 from PIL import Image
 from torchvision.transforms import ToPILImage
-
 
 # From (https://github.com/gokayfem/ComfyUI_VLM_nodes/blob/1ca496c1c8e8ada94d7d2644b8a7d4b3dc9729b3/nodes/qwen2vl.py)
 # Apache 2.0 License
@@ -146,11 +144,15 @@ def build_prompt(caption_type: str, caption_length: str | int, extra_options: li
 
 class JoyCaptionPredictor:
 	def __init__(self, model: str, memory_mode: str):
+		from transformers import AutoProcessor, LlavaForConditionalGeneration
 		checkpoint_path = Path(folder_paths.models_dir) / "LLavacheckpoints" / Path(model).stem
 		if not checkpoint_path.exists():
-			# Download the model
-			from huggingface_hub import snapshot_download
-			snapshot_download(repo_id=model, local_dir=str(checkpoint_path), force_download=False, local_files_only=False)
+			if Path("/stable-diffusion-cache/models").exists():
+				checkpoint_path = Path("/stable-diffusion-cache/models/LLavacheckpoints") / Path(model).stem
+			else:
+				# Download the model
+				from huggingface_hub import snapshot_download
+				snapshot_download(repo_id=model, local_dir=str(checkpoint_path), force_download=False, local_files_only=False)
 		
 		self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
