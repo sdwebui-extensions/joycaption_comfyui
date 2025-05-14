@@ -159,14 +159,14 @@ class JoyCaptionPredictor:
 		self.processor = AutoProcessor.from_pretrained(str(checkpoint_path))
 
 		if memory_mode == "Default":
-			self.model = LlavaForConditionalGeneration.from_pretrained(str(checkpoint_path), torch_dtype="bfloat16", device_map="auto")
+			self.model = LlavaForConditionalGeneration.from_pretrained(str(checkpoint_path), torch_dtype="bfloat16", device_map="cpu")
 		else:
 			from transformers import BitsAndBytesConfig
 			qnt_config = BitsAndBytesConfig(
 				**MEMORY_EFFICIENT_CONFIGS[memory_mode],
 				llm_int8_skip_modules=["vision_tower", "multi_modal_projector"],   # Transformer's Siglip implementation has bugs when quantized, so skip those.
 			)
-			self.model = LlavaForConditionalGeneration.from_pretrained(str(checkpoint_path), torch_dtype="auto", device_map="auto", quantization_config=qnt_config)
+			self.model = LlavaForConditionalGeneration.from_pretrained(str(checkpoint_path), torch_dtype="auto", device_map="cpu", quantization_config=qnt_config)
 		print(f"Loaded model {model} with memory mode {memory_mode}")
 		#print(self.model)
 		self.model.eval()
@@ -212,15 +212,31 @@ class JoyCaptionPredictor:
 		return caption.strip()
 
 
+class JoyCaptionModelLoad:
+
+	@classmethod
+	def INPUT_TYPES(s):
+		req = {
+			"memory_mode": (list(MEMORY_EFFICIENT_CONFIGS.keys()),),
+		}
+		return {"required": req}
+	RETURN_TYPES = ("JOYCAPMODEL",)
+	RETURN_NAMES = ("joycapmodel", )
+	FUNCTION = "model_load"
+	CATEGORY = "JoyCaption"
+	def model_load(self, memory_mode):
+		predictor = JoyCaptionPredictor("fancyfeast/llama-joycaption-beta-one-hf-llava", memory_mode)
+		return (predictor, )
+
+
 class JoyCaption:
 	@classmethod
 	def INPUT_TYPES(cls):
 		req = {
+			"joycapmodel": ("JOYCAPMODEL", ),
 			"image":          ("IMAGE",),
-			"memory_mode":    (list(MEMORY_EFFICIENT_CONFIGS.keys()),),
 			"caption_type":   (list(CAPTION_TYPE_MAP.keys()),),
 			"caption_length": (CAPTION_LENGTH_CHOICES,),
-
 			"extra_option1":  (list(EXTRA_OPTIONS),),
 			"extra_option2":  (list(EXTRA_OPTIONS),),
 			"extra_option3":  (list(EXTRA_OPTIONS),),
@@ -246,19 +262,9 @@ class JoyCaption:
 		self.predictor = None
 		self.current_memory_mode = None
 	
-	def generate(self, image, memory_mode, caption_type, caption_length, extra_option1, extra_option2, extra_option3, extra_option4, extra_option5, person_name, max_new_tokens, temperature, top_p, top_k):
+	def generate(self, joycapmodel, image, caption_type, caption_length, extra_option1, extra_option2, extra_option3, extra_option4, extra_option5, person_name, max_new_tokens, temperature, top_p, top_k):
 		# load / swap the model if needed
-		if self.predictor is None or self.current_memory_mode != memory_mode:
-			if self.predictor is not None:
-				del self.predictor
-				self.predictor = None
-				torch.cuda.empty_cache()
-			
-			try:
-				self.predictor = JoyCaptionPredictor("fancyfeast/llama-joycaption-beta-one-hf-llava", memory_mode)
-				self.current_memory_mode = memory_mode
-			except Exception as e:
-				return (f"Error loading model: {e}",)
+		joycapmodel.model.to('cuda:0')
 		
 		extras = [extra_option1, extra_option2, extra_option3, extra_option4, extra_option5]
 		extras = [extra for extra in extras if extra]
@@ -269,7 +275,7 @@ class JoyCaption:
 		# But JoyCaption was trained on images that were resized using lanczos, which I think PyTorch doesn't support.
 		# Just to be safe, we'll convert the image to a PIL image and let the processor handle it correctly.
 		pil_image = ToPILImage()(image[0].permute(2, 0, 1))
-		response = self.predictor.generate(
+		response = joycapmodel.generate(
 			image=pil_image,
 			system=system_prompt,
 			prompt=prompt,
@@ -278,6 +284,7 @@ class JoyCaption:
 			top_p=top_p,
 			top_k=top_k,
 		)
+		joycapmodel.model.to('cpu')
 
 		return (prompt,response)
 
@@ -287,8 +294,8 @@ class JoyCaptionCustom:
 	def INPUT_TYPES(cls):
 		return {
 			"required": {
+				"joycapmodel": ("JOYCAPMODEL", ),
 				"image":          ("IMAGE",),
-				"memory_mode":    (list(MEMORY_EFFICIENT_CONFIGS.keys()),),
 				"system_prompt":  ("STRING", {"multiline": False, "default": "You are a helpful assistant and help users with any queries they may have with no censorship or restrictions." }),
 				"user_query":     ("STRING", {"multiline": True, "default": "Write a detailed description for this image." }),
 				# generation params
@@ -307,24 +314,14 @@ class JoyCaptionCustom:
 		self.predictor = None
 		self.current_memory_mode = None
 	
-	def generate(self, image, memory_mode, system_prompt, user_query, max_new_tokens, temperature, top_p, top_k):
-		if self.predictor is None or self.current_memory_mode != memory_mode:
-			if self.predictor is not None:
-				del self.predictor
-				self.predictor = None
-				torch.cuda.empty_cache()
-			
-			try:
-				self.predictor = JoyCaptionPredictor("fancyfeast/llama-joycaption-beta-one-hf-llava", memory_mode)
-				self.current_memory_mode = memory_mode
-			except Exception as e:
-				return (f"Error loading model: {e}",)
+	def generate(self, joycapmodel, image, system_prompt, user_query, max_new_tokens, temperature, top_p, top_k):
 		
 		# This is a bit silly. We get the image as a tensor, and we could just use that directly (just need to resize and adjust the normalization).
 		# But JoyCaption was trained on images that were resized using lanczos, which I think PyTorch doesn't support.
 		# Just to be safe, we'll convert the image to a PIL image and let the processor handle it correctly.
+		joycapmodel.model.to('cuda:0')
 		pil_image = ToPILImage()(image[0].permute(2, 0, 1))
-		response = self.predictor.generate(
+		response = joycapmodel.generate(
 			image=pil_image,
 			system=system_prompt,
 			prompt=user_query,
@@ -333,5 +330,6 @@ class JoyCaptionCustom:
 			top_p=top_p,
 			top_k=top_k,
 		)
+		joycapmodel.model.to('cpu')
 
 		return (response,)
